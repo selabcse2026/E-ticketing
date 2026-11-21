@@ -1,0 +1,233 @@
+================================================================================
+KMIT SOFTWARE ENGINEERING LAB INTERNAL II - MASTER CHEAT SHEET
+Course Code: 23CC505PC / 23CC501PC
+================================================================================
+
+PORT USAGE REFERENCE:
+  8080 : Jenkins (Local Windows) / AWS EC2 App Port
+  8081 : Docker App / WordPress
+  8085 : Nagios Core Docker Container
+  3306 : MySQL Database Container
+  NodePort (Minikube): Run "minikube service ticket-web" to get dynamic URL
+
+--------------------------------------------------------------------------------
+MODULE 1: DOCKER & DOCKER COMPOSE
+--------------------------------------------------------------------------------
+
+1. CLI MULTI-CONTAINER (NETWORK & VOLUME):
+   docker network create app-net
+   docker volume create db-data
+   docker run -d --name db-server --network app-net -v db-data:/var/lib/mysql -e MYSQL_ROOT_PASSWORD=root -e MYSQL_DATABASE=appdb mysql:5.7
+   docker run -d --name web-server --network app-net -p 8081:80 -e WORDPRESS_DB_HOST=db-server:3306 -e WORDPRESS_DB_PASSWORD=root wordpress:latest
+   docker ps
+
+   Disaster Recovery Test:
+   docker rm -f db-server
+   docker run -d --name db-server --network app-net -v db-data:/var/lib/mysql -e MYSQL_ROOT_PASSWORD=root -e MYSQL_DATABASE=appdb mysql:5.7
+
+2. DOCKER COMPOSE (docker-compose.yml):
+version: '3.8'
+services:
+  db:
+    image: mysql:5.7
+    container_name: app-db
+    restart: always
+    environment:
+      MYSQL_ROOT_PASSWORD: root
+      MYSQL_DATABASE: appdb
+    volumes:
+      - db_data:/var/lib/mysql
+    networks:
+      - app-network
+
+  web:
+    image: wordpress:latest
+    container_name: app-web
+    restart: always
+    ports:
+      - "8081:80"
+    environment:
+      WORDPRESS_DB_HOST: db:3306
+      WORDPRESS_DB_PASSWORD: root
+    depends_on:
+      - db
+    networks:
+      - app-network
+
+volumes:
+  db_data:
+
+networks:
+  app-network:
+    driver: bridge
+
+   Compose Commands:
+   docker compose up -d
+   docker compose ps
+   docker compose logs -f
+   docker compose down
+
+--------------------------------------------------------------------------------
+MODULE 2: JENKINS CI/CD
+--------------------------------------------------------------------------------
+
+1. FREESTYLE PROJECT:
+   - SCM: Git -> Repo URL -> Branch: */main or */master
+   - Build Step: "Invoke top-level Maven targets" -> Goals: clean test package
+   - Post-build Actions:
+     * Archive the artifacts: **/* (or **/*.war, **/*.jar)
+     * Publish JUnit test result report: **/surefire-reports/*.xml (Click Advanced -> Check "Allow empty results")
+     * E-mail Notification: Type your email in Recipients
+
+2. SCRIPTED PIPELINE (Groovy Jenkinsfile):
+node {
+    stage('Clean Workspace') {
+        cleanWs()
+    }
+    stage('Checkout Code') {
+        git branch: 'master', url: 'https://github.com/SWARANGUNDA/carrepo.git'
+    }
+    stage('Build & Package') {
+        bat 'mvn clean test package'
+    }
+    stage('Archive Artifacts') {
+        archiveArtifacts artifacts: '**/*.war, **/*.jar', allowEmptyArchive: true
+    }
+    stage('Notify') {
+        mail to: 'swarangunda23@gmail.com',
+             subject: "Build Status: ${currentBuild.currentResult}",
+             body: "Build ${env.BUILD_NUMBER} finished with status: ${currentBuild.currentResult}"
+    }
+}
+
+3. GITHUB WEBHOOK (Instant Push Trigger):
+   - Local tunnel: ngrok http 8080
+   - In GitHub Repo -> Settings -> Webhooks -> Add Webhook:
+     Payload URL: https://<hash>.ngrok-free.dev/github-webhook/  (Must have trailing /)
+     Content type: application/json
+   - In Jenkins Job -> Build Triggers: Check "GitHub hook trigger for GITScm polling"
+
+--------------------------------------------------------------------------------
+MODULE 3: KUBERNETES (MINIKUBE)
+--------------------------------------------------------------------------------
+
+1. COMMANDS:
+   minikube start --driver=docker
+   kubectl get nodes
+   kubectl create deployment ticket-web --image=nginx:alpine
+   kubectl expose deployment ticket-web --type=NodePort --port=80
+   kubectl scale deployment ticket-web --replicas=5
+   kubectl get pods
+   minikube service ticket-web
+
+   Self-Healing Test:
+   kubectl delete pod <pod-name>
+   kubectl get pods -w
+
+   Cleanup:
+   kubectl delete svc ticket-web
+   kubectl delete deployment ticket-web
+
+--------------------------------------------------------------------------------
+MODULE 4: NAGIOS CORE
+--------------------------------------------------------------------------------
+
+1. DOCKER RUN:
+   docker run -d --name nagios-server -p 8085:80 jasonrivers/nagios:latest
+   Web Dashboard: http://localhost:8085
+   Credentials: nagiosadmin / nagios (or nagiosadmin)
+
+2. VIVA COMMANDS:
+   Syntax Check:
+   docker exec -it nagios-server /opt/nagios/bin/nagios -v /opt/nagios/etc/nagios.cfg
+
+   Direct Plugin Check:
+   docker exec -it nagios-server /opt/nagios/libexec/check_ping -H 127.0.0.1 -w 100.0,20% -c 500.0,60%
+
+3. CONFIG FILE DEFINITIONS (/opt/nagios/etc/objects/):
+   # Host definition in hosts.cfg
+   define host {
+       use                     linux-server
+       host_name               web-server
+       alias                   App Server
+       address                 192.168.1.100
+       max_check_attempts      3
+       check_period            24x7
+       notification_interval   30
+   }
+
+   # Service definition in services.cfg
+   define service {
+       use                     generic-service
+       host_name               web-server
+       service_description     HTTP Port 8080 Check
+       check_command           check_http!-p 8080 -u /
+       max_check_attempts      3
+       check_interval          5
+   }
+
+   define service {
+       use                     generic-service
+       host_name               web-server
+       service_description     MySQL Port 3306 Check
+       check_command           check_tcp!3306
+       check_interval          5
+   }
+
+--------------------------------------------------------------------------------
+MODULE 5: AWS EC2 CLOUD DEPLOYMENT
+--------------------------------------------------------------------------------
+
+1. AWS CONSOLE LAUNCH SETTINGS:
+   - AMI: Ubuntu Server 22.04 LTS (HVM)
+   - Instance Type: t2.micro
+   - Inbound Security Rules:
+     * SSH (22): Custom -> Prefix list com.amazonaws.us-east-1.ec2-instance-connect
+     * HTTP (80): Anywhere (0.0.0.0/0)
+     * Custom TCP (8080): Anywhere (0.0.0.0/0)
+   - Connection: Click "Connect" -> "EC2 Instance Connect" tab -> "Connect"
+
+2. UBUNTU TERMINAL COMMANDS (Step-by-Step):
+   sudo apt update -y
+   sudo apt install docker.io git maven openjdk-17-jdk -y
+   sudo systemctl start docker
+
+   export JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64
+   export PATH=$JAVA_HOME/bin:$PATH
+
+   git clone <REPO_URL>
+   cd <REPO_FOLDER>
+   mvn clean package
+
+   Check output type:
+   find target -type f -name "*.war"
+   find target -type f -name "*.jar"
+
+3A. IF WAR FILE (Tomcat Web Application):
+   cat << 'EOF' > Dockerfile
+   FROM tomcat:9.0-jdk8
+   RUN rm -rf /usr/local/tomcat/webapps/*
+   COPY target/*.war /usr/local/tomcat/webapps/ROOT.war
+   EXPOSE 8080
+   CMD ["catalina.sh", "run"]
+   EOF
+
+   sudo docker build -t web-app .
+   sudo docker run -d --name web-container -p 8080:8080 web-app
+   sudo docker ps
+   Access in browser: http://<EC2_PUBLIC_IP>:8080/
+
+3B. IF JAR FILE (Standalone Application):
+   cat << 'EOF' > Dockerfile
+   FROM eclipse-temurin:17-jre
+   WORKDIR /app
+   COPY target/*.jar app.jar
+   CMD ["java", "-cp", "app.jar", "KMIT.OVR_1.App"]
+   EOF
+
+   sudo docker build -t java-app .
+   sudo docker run -d --name java-container java-app
+   sudo docker ps -a
+   sudo docker logs java-container
+   Interactive run: sudo docker run -it --rm java-app
+
